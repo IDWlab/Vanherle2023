@@ -1,0 +1,647 @@
+---
+title: "IDW scrnaseq"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r}
+install.packages('Seurat')
+BiocManager::install('scater')
+install.packages('ggvenn')
+install.packages('dplyr')
+install.packages('pheatmap')
+install.packages('devtools')
+install.packages('clustree')
+install.packages('hdf5r')
+
+library(hdf5r)
+library(scater)
+library(Seurat)
+```
+#Import data for QC (h5 --> sce)
+```{r}
+
+ADAEKOdata <-  Read10X_h5('~/Documents/RStudio/AD_ApoE_2/data/ADAEKO.h5')
+ADAEWTdata <-  Read10X_h5('~/Documents/RStudio/AD_ApoE_2/data/ADAEWT.h5')
+WTdata <-  Read10X_h5('~/Documents/RStudio/AD_ApoE_2/data/WT.h5')
+
+
+ADAEKOobj <- CreateSeuratObject(counts = ADAEKOdata, project = "ApoE2", min.cells = 3, min.features = 200)
+ADAEWTobj <- CreateSeuratObject(counts = ADAEWTdata, project = "ApoE2", min.cells = 3, min.features = 200)
+WTobj <- CreateSeuratObject(counts = WTdata, project = "ApoE2", min.cells = 3, min.features = 200)
+
+ADAEKOcounts <- as.matrix(ADAEKOobj@assays$RNA@counts)
+ADAEWTcounts <- as.matrix(ADAEWTobj@assays$RNA@counts)
+WTcounts <- as.matrix(WTobj@assays$RNA@counts)
+
+
+ADAEKOsce <- SingleCellExperiment(assays=list(counts=ADAEKOcounts))
+ADAEWTsce <- SingleCellExperiment(assays=list(counts=ADAEWTcounts))
+WTsce <- SingleCellExperiment(assays=list(counts=WTcounts))
+
+#label <- substr(colnames(ADAEKOsce),18,18) 
+
+colData(ADAEKOsce)$sample <- "ADAEKO"
+colData(ADAEWTsce)$sample <- "ADAEWT"
+colData(WTsce)$sample <- "WT"
+
+rm(ADAEKOcounts, ADAEWTcounts, WTcounts)
+rm(ADAEKOobj, ADAEWTobj, WTobj)
+rm(ADAEKOdata, ADAEWTdata, WTdata)
+
+```
+
+
+#Quantify mitochondrial genes
+```{r}
+#For WT sample
+is.mito.WT <- grepl("^mt-",rownames(WTsce),ignore.case=TRUE) 
+is.ribosomal.WT <- grepl("^rp[sl]",rownames(WTsce),ignore.case=TRUE)
+
+#For ADAEWT
+is.mito.ADAEWT <- grepl("^mt-",rownames(ADAEWTsce),ignore.case=TRUE) 
+is.ribosomal.ADAEWT <- grepl("^rp[sl]",rownames(ADAEWTsce),ignore.case=TRUE)
+
+#For ADAEKO
+is.mito.ADAEKO <- grepl("^mt-",rownames(ADAEKOsce),ignore.case=TRUE) 
+is.ribosomal.ADAEKO <- grepl("^rp[sl]",rownames(ADAEKOsce),ignore.case=TRUE)
+
+
+## Calculate QC metrics per cell ####
+WTsce <- addPerCellQC(WTsce,subsets=list(Mt=is.mito.WT))
+ADAEWTsce <- addPerCellQC(ADAEWTsce,subsets=list(Mt=is.mito.ADAEWT))
+ADAEKOsce <- addPerCellQC(ADAEKOsce,subsets=list(Mt=is.mito.ADAEKO))
+
+head(colData(WTsce),2)
+head(colData(ADAEWTsce),2)
+head(colData(ADAEKOsce),2)
+
+names(colData(WTsce))[c(2,3,6)] <- c("nUMI","nGene","mito")
+names(colData(ADAEWTsce))[c(2,3,6)] <- c("nUMI","nGene","mito")
+names(colData(ADAEKOsce))[c(2,3,6)] <- c("nUMI","nGene","mito")
+
+
+```
+
+
+# Detect outliers cells using scater ####
+```{r}
+#identify cells with very low library size
+colData(WTsce)$nUMI.out.low <- isOutlier(colData(WTsce)$nUMI,
+                                       nmads=3,
+                                       type="lower",
+                                       log=TRUE) 
+
+colData(ADAEWTsce)$nUMI.out.low <- isOutlier(colData(ADAEWTsce)$nUMI,
+                                       nmads=3,
+                                       type="lower",
+                                       log=TRUE) 
+colData(ADAEKOsce)$nUMI.out.low <- isOutlier(colData(ADAEKOsce)$nUMI,
+                                       nmads=3,
+                                       type="lower",
+                                       log=TRUE) 
+
+#identify cells with very high library size
+
+colData(WTsce)$nUMI.out.high <- isOutlier(colData(WTsce)$nUMI,
+                                       nmads=3,
+                                       type="higher",
+                                       log=TRUE) 
+
+colData(ADAEWTsce)$nUMI.out.high <- isOutlier(colData(ADAEWTsce)$nUMI,
+                                       nmads=3,
+                                       type="higher",
+                                       log=TRUE) 
+colData(ADAEKOsce)$nUMI.out.high <- isOutlier(colData(ADAEKOsce)$nUMI,
+                                       nmads=3,
+                                       type="higher",
+                                       log=TRUE) 
+
+
+#How many outliers?
+sum(colData(WTsce)$nUMI.out.low | colData(WTsce)$nUMI.out.high)
+sum(colData(ADAEWTsce)$nUMI.out.low | colData(ADAEWTsce)$nUMI.out.high)
+sum(colData(ADAEKOsce)$nUMI.out.low | colData(ADAEKOsce)$nUMI.out.high)
+
+
+## Number of expressed genes per cell
+#identify cells with very few expressed genes?
+colData(WTsce)$nGene.out.low <- isOutlier(colData(WTsce)$nGene,
+                                        nmads=3,
+                                        type="lower",
+                                        log=TRUE) 
+colData(ADAEWTsce)$nGene.out.low <- isOutlier(colData(ADAEWTsce)$nGene,
+                                        nmads=3,
+                                        type="lower",
+                                        log=TRUE) 
+colData(ADAEKOsce)$nGene.out.low <- isOutlier(colData(ADAEKOsce)$nGene,
+                                        nmads=3,
+                                        type="lower",
+                                        log=TRUE) 
+
+#identify cells with a lot of expressed genes
+colData(WTsce)$nGene.out.high <- isOutlier(colData(WTsce)$nGene,
+                                         nmads=3,
+                                         type="higher",
+                                         log=TRUE) 
+colData(ADAEWTsce)$nGene.out.high <- isOutlier(colData(ADAEWTsce)$nGene,
+                                         nmads=3,
+                                         type="higher",
+                                         log=TRUE) 
+colData(ADAEKOsce)$nGene.out.high <- isOutlier(colData(ADAEKOsce)$nGene,
+                                         nmads=3,
+                                         type="higher",
+                                         log=TRUE) 
+
+
+sum(colData(WTsce)$nGene.out.low | colData(WTsce)$nGene.out.high)
+sum(colData(ADAEWTsce)$nGene.out.low | colData(ADAEWTsce)$nGene.out.high)
+sum(colData(ADAEKOsce)$nGene.out.low | colData(ADAEKOsce)$nGene.out.high)
+
+## Mitochondrial count percentages
+#Cells with high percentage of mitochondrial transcripts?
+colData(WTsce)$mito.out.high <- isOutlier(colData(WTsce)$mito,
+                                        nmads=5,
+                                        type="higher",
+                                        log=F)
+colData(ADAEWTsce)$mito.out.high <- isOutlier(colData(ADAEWTsce)$mito,
+                                        nmads=5,
+                                        type="higher",
+                                        log=F)
+colData(ADAEKOsce)$mito.out.high <- isOutlier(colData(ADAEKOsce)$mito,
+                                        nmads=5,
+                                        type="higher",
+                                        log=F)
+sum(colData(WTsce)$mito.out.high)
+sum(colData(ADAEWTsce)$mito.out.high)
+sum(colData(ADAEKOsce)$mito.out.high)
+
+#create data frame for plotting
+metaDataWT <- as.data.frame(colData(WTsce))
+metaDataADAEWT <- as.data.frame(colData(ADAEWTsce))
+metaDataADAEKO <- as.data.frame(colData(ADAEKOsce))
+
+
+```
+
+## Create violin plots 
+###Before filtering
+```{r}
+#nUMI
+pWT <- ggplot(metaDataWT,aes("",nUMI)) +
+  geom_jitter(height=0,width=0.3,aes(color=nUMI.out.low|nUMI.out.high)) +
+  geom_violin(fill="gray80",alpha=0.5) +
+  scale_color_manual(values=c("#00BFC4","#F8766D")) + 
+  ggtitle("Total UMI counts per cell") +
+  theme_classic()
+pADAEWT <- ggplot(metaDataADAEWT,aes("",nUMI)) +
+  geom_jitter(height=0,width=0.3,aes(color=nUMI.out.low|nUMI.out.high)) +
+  geom_violin(fill="gray80",alpha=0.5) +
+  scale_color_manual(values=c("#00BFC4","#F8766D")) + 
+  ggtitle("Total UMI counts per cell") +
+  theme_classic()
+pADAEKO <- ggplot(metaDataADAEKO,aes("",nUMI)) +
+  geom_jitter(height=0,width=0.3,aes(color=nUMI.out.low|nUMI.out.high)) +
+  geom_violin(fill="gray80",alpha=0.5) +
+  scale_color_manual(values=c("#00BFC4","#F8766D")) + 
+  ggtitle("Total UMI counts per cell") +
+  theme_classic()
+
+#nGene
+pWT <- ggplot(metaDataWT,aes("",nGene)) +
+  geom_jitter(height=0,width=0.3,aes(color=nGene.out.low|nGene.out.high)) +
+  geom_violin(fill="gray80",alpha=0.5) +
+  scale_color_manual(values=c("#00BFC4","#F8766D")) + 
+  ggtitle("Total UMI counts per cell") +
+  theme_classic()
+pADAEWT <- ggplot(metaDataADAEWT,aes("",nGene)) +
+  geom_jitter(height=0,width=0.3,aes(color=nGene.out.low|nGene.out.high)) +
+  geom_violin(fill="gray80",alpha=0.5) +
+  scale_color_manual(values=c("#00BFC4","#F8766D")) + 
+  ggtitle("Total UMI counts per cell") +
+  theme_classic()
+pADAEKO <- ggplot(metaDataADAEKO,aes("",nGene)) +
+  geom_jitter(height=0,width=0.3,aes(color=nGene.out.low|nGene.out.high)) +
+  geom_violin(fill="gray80",alpha=0.5) +
+  scale_color_manual(values=c("#00BFC4","#F8766D")) + 
+  ggtitle("Total UMI counts per cell") +
+  theme_classic()
+
+#mito
+pWT <- ggplot(metaDataWT,aes("",mito)) +
+  geom_jitter(height=0,width=0.3,aes(color=mito.out.high)) +
+  geom_violin(fill="gray80",alpha=0.5) +
+  scale_color_manual(values=c("#00BFC4","#F8766D")) + 
+  ggtitle("% mito genes per cell") +
+  theme_classic()
+pADAEWT <- ggplot(metaDataADAEWT,aes("",mito)) +
+  geom_jitter(height=0,width=0.3,aes(color=mito.out.high)) +
+  geom_violin(fill="gray80",alpha=0.5) +
+  scale_color_manual(values=c("#00BFC4","#F8766D")) + 
+  ggtitle("% mito genes per cell") +
+  theme_classic()
+pADAEKO <- ggplot(metaDataADAEKO,aes("",mito)) +
+  geom_jitter(height=0,width=0.3,aes(color=mito.out.high)) +
+  geom_violin(fill="gray80",alpha=0.5) +
+  scale_color_manual(values=c("#00BFC4","#F8766D")) + 
+  ggtitle("% mito genes per cell") +
+  theme_classic()
+
+
+
+
+```
+
+
+###After filtering
+#identify cells to keep
+```{r}
+non.outWT <- !(metaDataWT$nUMI.out.low | 
+               metaDataWT$nUMI.out.high | 
+               metaDataWT$nGene.out.low | 
+               metaDataWT$nGene.out.high
+             )
+non.outADAEWT <- !(metaDataADAEWT$nUMI.out.low | 
+               metaDataADAEWT$nUMI.out.high | 
+               metaDataADAEWT$nGene.out.low | 
+               metaDataADAEWT$nGene.out.high
+             )
+non.outADAEKO <- !(metaDataADAEKO$nUMI.out.low | 
+               metaDataADAEKO$nUMI.out.high | 
+               metaDataADAEKO$nGene.out.low | 
+               metaDataADAEKO$nGene.out.high
+             )
+metaDataWT.filtered <- metaDataWT[non.outWT,]
+metaDataADAEWT.filtered <- metaDataADAEWT[non.outADAEWT,]
+metaDataADAEKO.filtered <- metaDataADAEKO[non.outADAEKO,]
+
+metaDataWT.filtered <- metaDataWT.filtered[metaDataWT.filtered$mito<5,]
+metaDataADAEWT.filtered <- metaDataADAEWT.filtered[metaDataADAEWT.filtered$mito<5,]
+metaDataADAEKO.filtered <- metaDataADAEKO.filtered[metaDataADAEKO.filtered$mito<5,]
+
+dim(metaDataWT.filtered)
+dim(metaDataADAEWT.filtered)
+dim(metaDataADAEKO.filtered)
+
+ggplot(metaDataWT.filtered,aes("",mito)) +
+  geom_jitter(height=0,width=0.3,aes(color=mito.out.high)) +
+  geom_violin(fill="gray80",alpha=0.5) +
+  scale_color_manual(values=c("#00BFC4","#F8766D")) + 
+  ggtitle("% mito genes per cell after filtering") +
+  theme_classic()
+
+## Create Venn diagram 
+ggvenn(list(nGene=rownames(metaDataADAEKO[metaDataADAEKO$nGene.out.low,]),
+            mito=rownames(metaDataADAEKO[metaDataADAEKO$mito.out.high,])),
+       fill_color=c("green","orange"),show_percentage=FALSE) 
+
+
+```
+
+#remove outliers
+```{r}
+##Remove outliers from sce
+#mito and ngenes outliers are the same cells
+#keep <- !(metaData$mito.out.high) 
+#sce <- sce[,keep] 
+#dim(sce)
+
+```
+
+
+#save filtered samples from scater
+```{r}
+saveRDS(WTsce,file="WTsce.rds")
+saveRDS(ADAEWTsce,file="ADAEWTsce.rds")
+saveRDS(ADAEKOsce,file="ADAEKOsce.rds")
+
+rm(list=ls())
+```
+
+
+#Retrieve filtered data
+```{r}
+WT <- readRDS("~/Documents/RStudio/AD_ApoE_2/WTsce.rds")
+ADAEWT <- readRDS("~/Documents/RStudio/AD_ApoE_2/ADAEWTsce.rds")
+ADAEKO <- readRDS("~/Documents/RStudio/AD_ApoE_2/ADAEKOsce.rds")
+
+WTcounts <- counts(WT)
+WTmetaData <- colData(WT) 
+
+ADAEWTcounts <- counts(ADAEWT)
+ADAEWTmetaData <- colData(ADAEWT) 
+
+ADAEKOcounts <- counts(ADAEKO)
+ADAEKOmetaData <- colData(ADAEKO) 
+
+#CreateSeuratObject
+WTsObj <- CreateSeuratObject(counts=WTcounts) 
+ADAEWTsObj <- CreateSeuratObject(counts=ADAEWTcounts) 
+ADAEKOsObj <- CreateSeuratObject(counts=ADAEKOcounts) 
+
+##AddMetaData
+WTsObj <- AddMetaData(WTsObj,as.data.frame(WTmetaData)) 
+ADAEWTsObj <- AddMetaData(ADAEWTsObj,as.data.frame(ADAEWTmetaData)) 
+ADAEKOsObj <- AddMetaData(ADAEKOsObj,as.data.frame(ADAEKOmetaData)) 
+
+#clean up the workspace
+rm(WT, ADAEWT, ADAEKO)
+rm(WTcounts, ADAEWTcounts, ADAEKOcounts)
+rm(WTmetaData, ADAEWTmetaData, ADAEKOmetaData)
+
+```
+
+#Apply Seurat pipeline in list
+```{r}
+sObjlist <- list(WTsObj, ADAEWTsObj, ADAEKOsObj)
+
+sObjlist <- lapply(sObjlist, NormalizeData)
+sObjlist <- lapply(sObjlist, FindVariableFeatures)
+sObjlist <- lapply(sObjlist, ScaleData)
+sObjlist <- lapply(sObjlist, function(x) RunPCA(x, verbose=F))
+
+WTsObj <- sObjlist[[1]]
+ADAEWTsObj <- sObjlist[[2]]
+ADAEKOsObj <- sObjlist[[3]]
+
+length(VariableFeatures(WTsObj))
+head(VariableFeatures(WTsObj),20)
+head(WTsObj@assays$RNA@var.features)
+head(HVFInfo(WTsObj))
+
+#Label the top20 most variable gene
+top20mvg <- head(VariableFeatures(WTsObj), 20)
+p <- LabelPoints(plot = VariableFeaturePlot(WTsObj),
+                 points = top20mvg,
+                 repel = T
+                )
+
+#Heatmaps
+DimHeatmap(WTsObj,dims=1:12,cells=500,balanced=TRUE)
+DimHeatmap(ADAEWTsObj,dims=1:12,cells=500,balanced=TRUE)
+DimHeatmap(ADAEKOsObj,dims=1:12,cells=500,balanced=TRUE)
+
+ElbowPlot(WTsObj, ndims = 50, reduction = "pca")
+ElbowPlot(ADAEWTsObj, ndims = 50, reduction = "pca")
+ElbowPlot(ADAEKOsObj, ndims = 50, reduction = "pca")
+
+
+#Running the FindNeighbors in the list
+sObjlist <- lapply(sObjlist, function(x) FindNeighbors (x, dims=1:30))
+WTsObj <- sObjlist[[1]]
+ADAEWTsObj <- sObjlist[[2]]
+ADAEKOsObj <- sObjlist[[3]]
+
+#FindClusters
+#set different resolutions
+WTsObj <- FindClusters(WTsObj,resolution=c(0.2, 0.3, 0.5),
+                          graph.name="RNA_snn") 
+ADAEWTsObj <- FindClusters(ADAEWTsObj,resolution=c(0.2, 0.3, 0.5),
+                          graph.name="RNA_snn") 
+ADAEKOsObj <- FindClusters(ADAEKOsObj,resolution=c(0.2, 0.3, 0.5),
+                          graph.name="RNA_snn") 
+
+library(clustree)
+clustree(WTsObj@meta.data,prefix="RNA_snn_res.")
+clustree(ADAEWTsObj@meta.data,prefix="RNA_snn_res.")
+clustree(ADAEKOsObj@meta.data,prefix="RNA_snn_res.")
+
+
+WTsObj <- RunUMAP(WTsObj,dims=1:30,n.neighbors=20)
+ADAEWTsObj <- RunUMAP(ADAEWTsObj,dims=1:30,n.neighbors=20)
+ADAEKOsObj <- RunUMAP(ADAEKOsObj,dims=1:30,n.neighbors=20)
+
+DimPlot(ADAEKOsObj)
+FeaturePlot(ADAEWTsObj,feature="Clec7a",label=TRUE)
+
+saveRDS(WTsObj, "WTsObj.rds")
+saveRDS(WTsObj, "ADAEWTsObj.rds")
+saveRDS(WTsObj, "ADAEKOsObj.rds")
+
+```
+
+
+#Merge objects
+```{r}
+AllsObj <- merge(WTsObj, 
+                 y = c(ADAEWTsObj, ADAEKOsObj), 
+                 add.cell.ids = c("WT", "ADAEWT", "ADAEKO")
+                 )
+head(colnames(AllsObj))
+
+#Seurat pipeline on merged data
+AllsObj <- NormalizeData(AllsObj)
+AllsObj <- FindVariableFeatures(AllsObj)
+#plot variable genes
+VariableFeaturePlot(AllsObj)
+AllsObj <- ScaleData(AllsObj)
+AllsObj <- RunPCA(AllsObj,nfeatures.print=10)
+#DimHeatmap(seuratObj,dims=1:10,cells=500,balanced=TRUE)
+ElbowPlot(AllsObj,ndims=50)
+AllsObj <- FindNeighbors(AllsObj,dims=1:30)
+AllsObj <- FindClusters(AllsObj,resolution=c(0.2, 0.3, 0.5),
+                          graph.name="RNA_snn") 
+
+AllsObj <- RunUMAP(AllsObj,dims=1:30,n.neighbors=20)
+
+DimPlot(AllsObj,
+        split.by = "sample",
+        #pt.size = 0.1
+        )
+FeaturePlot(AllsObj,
+            features = "Selplg",
+            split.by = "sample"
+            )
+
+saveRDS(AllsObj, "AllsObj789.rds")
+```
+
+#Find all variable genes
+```{r}
+AllsObj789 <- readRDS("~/Documents/RStudio/AD_ApoE_2/2_Seurat_objects_merged/AllsObj789.rds")
+
+AM <- FindAllMarkers(AllsObj789, only.pos = T, min.diff.pct = 0.5)
+
+markers.to.plot <- c("Tmem119", "P2ry12", "Selplg",       ## homeostatic microglia
+                     "Sall1", "Apoe", "Cst7", "Lpl",      ## reactive, DAM
+                     "Ifit3", "Usp18", "Isg15",           ## inf sign microglia
+                     "Top2a", "Cdk1", "Mcm5",             ## prolif Mg
+                     "H2-Aa", "Ms4a7", "Pf4",             ## BAM MHCII high
+                     "Mrc1", "Dab2",                      ## BAM Mrc1 
+                     "Itgax", "Ace", "Spn", "Treml4",     ## non-classical monocytes
+                     "Ms4a4c", "S100a6","Ifitm3",         ## Inflammatory Mo 
+                     "Camp","Ly6g", "S100a8",             ## Granulocytes
+                     "Cd19","Pax5", "Ms4a1",              ## B cells 
+                     "Cd3e","Cd4", "Cd8a",                ## T cells/ILC2
+                     "Nkg7","Klrb1c",                     ## NK cells
+                     "Pecam1", "Egfl7", "Cdh5",           ## Endothelial cells
+                     "Jchain")                            ## Plasma cells         
+
+DotPlot(AllsObj789, 
+        #assay = "RNA",
+        features = markers.to.plot, 
+        cols = "RdBu", #c("navy", "red"), 
+        dot.scale = 8,
+        col.min = -0.8,
+        scale.by = "radius",
+        #split.by = "genotype",
+        ) + RotatedAxis() + theme(axis.text.x=element_text(angle = 90))
+
+
+
+DimPlot(AllsObj789,
+        #split.by = "sample",
+        #pt.size = 0.1,
+        cols = "Paired",
+        label = T
+        )
+
+
+FeaturePlot(AllsObj789,
+            features = "Apoe",
+            split.by = "sample"
+            )
+
+SuppFigN <- subset(AllsObj789,
+                           idents = c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 14, 15, 17)
+                           )
+
+saveRDS(SuppFigN, "SuppFigN.RDS")
+
+```
+
+
+```{r}
+# subset the microglia population (populations 0, 1, 2, 3, 4, 11)
+
+microglia.subset <- subset(AllsObj789,
+                           idents = c(0, 1, 2, 3, 4, 11)
+                           )
+UMAPv2 <- DimPlot(microglia.subset,
+        split.by = "sample",
+        cols = colors1b,
+        pt.size = 1,
+        label = F
+        )
+      
+tiff("../outputs/UMAP_batch2.tiff",
+     width = 1400,
+     height = 600)
+  UMAPv2
+dev.off()
+
+markers.to.plot.Mg <- c("Hexb", "Cst3", "C1qa", "Fcgr1", "Adgre1", "Aif1",     ## general Mg markers
+                     "Tmem119", "P2ry12", "Selplg",       ## homeostatic microglia
+                     "Sall1", "Apoe", "Cst7", "Lpl",      ## reactive, DAM
+                     "Bst2", "Ccl12", "Clec7a",           ## reactive, DAM
+                     "Ifit3", "Usp18", "Isg15",           ## inf sign microglia
+                     "Jun", "Junb", "Jund", "Fos")        ## transcriptionally active Mg
+                    # "Egr1", "Klf6", "Atf3", 
+                    # "Notch2", "Bmp2k", "Ncoa3"
+                    # )    
+
+colors1b = c("#F0E442", #h Mg
+           "#F0E442", #taMg1
+           "#F0E442", #taMg2
+           "#E69F00", #"#009E73", #trans active Mg
+           "#FF0000", #DAM
+           "#0072B2" #inf-sign Mg
+           )
+ DP1 <- DotPlot(microglia.subset, 
+        assay = "RNA",
+        #idents = c(0, 1, 2, 3, 4, 11),
+        features = markers.to.plot.Mg, 
+        cols = "PuOr", #c("navy", "white", "red"), #= "Spectral"
+        dot.scale = 8,
+        col.min = -0.8,
+        scale.by = "radius",
+        split.by = "sample",
+        ) + RotatedAxis() + theme(axis.text.x=element_text(angle = 90))
+```
+
+
+
+#Identify the microglia subpopulations
+```{r}
+
+
+microglia.subset <- RenameIdents(object = microglia.subset, 
+                               "0" = "hMg",
+                               "1" = "taMg1",
+                               "2" = "taMg2",
+                               "3" = "rMg",
+                               "4" = "DAM",
+                               "11" = "IFN-sign"
+                               ) 
+
+microglia.subset[["cell.type"]] <- Idents(object = microglia.subset)
+
+microglia.subset <- readRDS("~/Documents/RStudio/AD_ApoE_2/3_Seurat_object_microglia.subset/microglia.subset.RDS")
+
+View(table(microglia.subset@meta.data$cell.type, microglia.subset@meta.data$sample))
+
+
+VlnPlot(microglia.subset,
+        features = "Apoe",
+        split.by = "cell.type",
+        group.by = "sample"
+        )
+
+saveRDS(microglia.subset, "~/Documents/RStudio/AD_ApoE_2/3_Seurat_object_microglia.subset/microglia.subset.RDS")
+```
+#Additional data representation
+
+```{r}
+#Feature plots
+
+
+markers_genes <- c("P2ry12",     ## homeostatic microglia
+                   "Cst7", "Clec7a",              ## reactive, DAM
+                   "Isg15"           ## inf sign microglia
+                      )    
+
+
+GEmarkers <- FeaturePlot(microglia.subset,
+            features = markers_genes,
+            pt.size = 1,
+            cols = c("grey", "red"),
+            split.by = "sample",
+            repel = TRUE
+            ) & NoLegend() & NoAxes()
+
+#GEmarkers & NoLegend() & NoAxes()
+
+tiff("../outputs/Genes_v2.tiff",
+     width = 600,
+     height = 1000)
+ GEmarkers
+dev.off()
+
+
+```
+
+#Perform DGE analysis
+## using the microglia.subset object
+```{r}
+
+# AE <- AverageExpression(microglia.subset,
+#                         assays = "RNA",
+#                         group.by = "sample",
+#                         verbose = T
+#                         )
+microglia.subset <- SetIdent(microglia.subset, value = "geno_cell.type")
+
+DAMMg_ADAEWTvsADAEKO <- FindMarkers(microglia.subset,
+                                   ident.1= "ADAEWT_DAM",
+                                   ident.2 = "ADAEKO_DAM",
+                                   assay = "RNA",
+                                   logfc.threshold = log2(1.2),
+                                   test.use = "wilcox",
+                                   verbose = F
+                                   )
+
+
+saveRDS(microglia.subset, "microglia.subset.Fig7RDS")
+```
